@@ -1,0 +1,142 @@
+version: "3.8"
+services:
+  # ============================================
+  # Base de Datos PostgreSQL
+  # ============================================
+  db:
+    image: postgres:15
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================
+  # Backend API (NestJS)
+  # ============================================
+  api:
+    image: arielben75/backend-reservas:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "3000:8400"
+    networks:
+      - backend
+      - frontend
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      ENV_FILE_MAX_SIZE: ${ENV_FILE_MAX_SIZE}
+      ENV_CORS: ${ENV_CORS}
+      DEBUG_SERVER: ${DEBUG_SERVER}
+      ENV_SWAGGER_SHOW: ${ENV_SWAGGER_SHOW}
+      ENV_APP_NAME: ${ENV_APP_NAME}
+      JWT_SECRET: ${JWT_SECRET}
+    command: ["sh", "-c", "npx prisma migrate deploy && npm run start:prod"]
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8400/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ============================================
+  # Analytics (Umami)
+  # ============================================
+  analytics:
+    image: ghcr.io/umami-software/umami:postgresql-latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      backend:
+        aliases:
+          - analytics
+    environment:
+      DATABASE_URL: ${DATABASE_URL_UMAMI}
+      HASH_SALT: ${UMAMI_HASH_SALT}
+      PORT: 3000
+      HOSTNAME: "0.0.0.0"
+      TRACKER_SCRIPT_NAME: umami.js
+      DISABLE_TELEMETRY: "true"
+      CORS_ALLOWED_ORIGINS: "http://localhost:5173,http://localhost:3000"
+    ports:
+      - "8080:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://127.0.0.1:3000 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 300s
+
+  # ============================================
+  # Frontend (React + Nginx)
+  # ============================================
+  frontend:
+    image: arielben75/frontend-reservas:latest
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+    depends_on:
+      api:
+        condition: service_started
+      analytics:
+        condition: service_healthy
+    networks:
+      - frontend
+      - backend
+    volumes:
+      - shared_data:/shared:ro
+
+# ============================================
+# Redes
+# ============================================
+networks:
+  backend:
+    driver: bridge
+  frontend:
+    driver: bridge
+
+# ============================================
+# Volúmenes
+# ============================================
+volumes:
+  db_data:
+    driver: local
+  shared_data:
+    driver: local
+
+# docker swarm join --token SWMTKN-1-0ggmsnu38t9rm40zclylgxr3wrvtod38wbzf08ctdc1wpz5tqe-1x3ixv4qbjigovsluldkmu6z1 192.168.65.3:2377
+
+#echo "PruebasPosgres" | docker secret create postgres_password -
+#l3ag0mppnr24iwhdwny5yoai8
+
+#echo "q^WUUG7NAex9Da5eT@Y4YKv" | docker secret create jwt_secret -
+#bash: !eT@Y4Y: event not found
+
+#echo "umami" | docker secret create umami_password -
+#6wxb0shrzsog5z7vpzdkr70ye
+
+#echo "tu_salt_unico_super_seguro_cambia_esto" | docker secret create umami_hash_salt -
+#ttxagtvztyxigbdgy7p3ifyhu
+
+#docker config create init_db_script ./init-db.sh
+#hh6ruxwegvtnbbvf5pmowo3m3

@@ -1,0 +1,512 @@
+# ============================================
+# ARCHIVO COMPLETO CON TODOS LOS MANIFIESTOS
+# ============================================
+# Puedes aplicar todo de una vez con:
+# kubectl apply -f todos-los-manifiestos.yaml
+# ============================================
+
+---
+# 1. NAMESPACE
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: reservas-app
+  labels:
+    name: reservas-app
+    environment: production
+
+---
+# 2. SECRETS
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app-secrets
+  namespace: reservas-app
+type: Opaque
+stringData:
+  POSTGRES_USER: "postgres"
+  POSTGRES_PASSWORD: "PruebasPosgres"
+  POSTGRES_DB: "reservas_db"
+  POSTGRES_DB_UMAMI: "umami_db"
+  DATABASE_URL: "postgresql://postgres:PruebasPosgres@postgres-service:5432/reservas_db?schema=public"
+  DATABASE_URL_UMAMI: "postgresql://postgres:PruebasPosgres@postgres-service:5432/umami_db?schema=public"
+  JWT_SECRET: "q^WUUG7NAex9Da5eT@Y4YKv"
+  UMAMI_HASH_SALT: "pruenas_ariel_salt"
+  UMAMI_USERNAME: "admin"
+  UMAMI_PASSWORD: "umami"
+
+---
+# 3. CONFIGMAP
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: reservas-app
+data:
+  NODE_ENV: "production"
+  ENV_PORT: "8400"
+  ENV_CORS: "http://localhost:3039"
+  ENV_FILE_MAX_SIZE: "120mb"
+  DEBUG_SERVER: "true"
+  ENV_SWAGGER_SHOW: "true"
+  ENV_APP_NAME: "Ariel"
+  WEBSITE_DOMAIN: "localhost:5173"
+  WEBSITE_NAME: "Reservas App"
+  TRACKER_SCRIPT_NAME: "umami.js"
+  DISABLE_TELEMETRY: "true"
+  CORS_ALLOWED_ORIGINS: "http://localhost:5173,http://localhost:3000"
+  HOSTNAME: "0.0.0.0"
+  VITE_UMAMI_URL: "http://localhost:8080"
+  VITE_UMAMI_WEBSITE_ID: "tu-website-id-aqui"
+
+---
+# 4. POSTGRES INIT SCRIPT
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init-script
+  namespace: reservas-app
+data:
+  init-db.sh: |
+    #!/bin/bash
+    set -e
+    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
+        CREATE DATABASE umami_db;
+        GRANT ALL PRIVILEGES ON DATABASE umami_db TO $POSTGRES_USER;
+    EOSQL
+
+---
+# 5. PERSISTENT VOLUME CLAIM
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: reservas-app
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+# 6. POSTGRES DEPLOYMENT
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: reservas-app
+  labels:
+    app: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:15
+          ports:
+            - containerPort: 5432
+              name: postgres
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: POSTGRES_DB
+          volumeMounts:
+            - name: postgres-storage
+              mountPath: /var/lib/postgresql/data
+            - name: init-script
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - postgres
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - postgres
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+      volumes:
+        - name: postgres-storage
+          persistentVolumeClaim:
+            claimName: postgres-pvc
+        - name: init-script
+          configMap:
+            name: postgres-init-script
+            defaultMode: 0755
+
+---
+# 7. POSTGRES SERVICE
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: reservas-app
+  labels:
+    app: postgres
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5432
+      targetPort: 5432
+      protocol: TCP
+      name: postgres
+  selector:
+    app: postgres
+
+---
+# 8. API DEPLOYMENT
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: reservas-app
+  labels:
+    app: api
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      initContainers:
+        - name: wait-for-postgres
+          image: busybox:1.35
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z postgres-service 5432; do
+                echo "Esperando PostgreSQL..."
+                sleep 2
+              done
+      containers:
+        - name: api
+          image: arielben75/backend-reservas:latest
+          ports:
+            - containerPort: 8400
+              name: http
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: DATABASE_URL
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: JWT_SECRET
+            - name: NODE_ENV
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: NODE_ENV
+            - name: ENV_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: ENV_PORT
+            - name: ENV_CORS
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: ENV_CORS
+            - name: ENV_FILE_MAX_SIZE
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: ENV_FILE_MAX_SIZE
+            - name: DEBUG_SERVER
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: DEBUG_SERVER
+            - name: ENV_SWAGGER_SHOW
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: ENV_SWAGGER_SHOW
+            - name: ENV_APP_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: ENV_APP_NAME
+          command:
+            - sh
+            - -c
+            - "npx prisma migrate deploy && npm run start:prod"
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8400
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8400
+            initialDelaySeconds: 40
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+
+---
+# 9. API SERVICE
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-service
+  namespace: reservas-app
+  labels:
+    app: api
+spec:
+  type: LoadBalancer
+  ports:
+    - port: 3000
+      targetPort: 8400
+      protocol: TCP
+      name: http
+  selector:
+    app: api
+
+---
+# 10. ANALYTICS DEPLOYMENT
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: analytics
+  namespace: reservas-app
+  labels:
+    app: analytics
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: analytics
+  template:
+    metadata:
+      labels:
+        app: analytics
+    spec:
+      initContainers:
+        - name: wait-for-postgres
+          image: busybox:1.35
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z postgres-service 5432; do
+                echo "Esperando PostgreSQL..."
+                sleep 2
+              done
+      containers:
+        - name: analytics
+          image: ghcr.io/umami-software/umami:postgresql-latest
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: DATABASE_URL_UMAMI
+            - name: HASH_SALT
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: UMAMI_HASH_SALT
+            - name: PORT
+              value: "3000"
+            - name: HOSTNAME
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: HOSTNAME
+            - name: TRACKER_SCRIPT_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: TRACKER_SCRIPT_NAME
+            - name: DISABLE_TELEMETRY
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: DISABLE_TELEMETRY
+            - name: CORS_ALLOWED_ORIGINS
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: CORS_ALLOWED_ORIGINS
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 300
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+
+---
+# 11. ANALYTICS SERVICE
+apiVersion: v1
+kind: Service
+metadata:
+  name: analytics-service
+  namespace: reservas-app
+  labels:
+    app: analytics
+spec:
+  type: LoadBalancer
+  ports:
+    - port: 8080
+      targetPort: 3000
+      protocol: TCP
+      name: http
+  selector:
+    app: analytics
+
+---
+# 12. FRONTEND DEPLOYMENT
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: reservas-app
+  labels:
+    app: frontend
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+        - name: frontend
+          image: arielben75/frontend-reservas:latest
+          ports:
+            - containerPort: 80
+              name: http
+          env:
+            - name: VITE_UMAMI_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: VITE_UMAMI_URL
+            - name: VITE_UMAMI_WEBSITE_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: VITE_UMAMI_WEBSITE_ID
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+
+---
+# 13. FRONTEND SERVICE
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-service
+  namespace: reservas-app
+  labels:
+    app: frontend
+spec:
+  type: LoadBalancer
+  ports:
+    - port: 5173
+      targetPort: 80
+      protocol: TCP
+      name: http
+  selector:
+    app: frontend

@@ -1,0 +1,113 @@
+
+# Deployment del API SIN ejecutar las migraciones de Prisma
+# Aplica este archivo si las migrations están causando problemas
+# kubectl apply -f fix-api-sin-migrations.yaml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: reservas-app
+  labels:
+    app: api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      initContainers:
+      - name: wait-for-postgres
+        image: busybox:1.35
+        command:
+        - sh
+        - -c
+        - |
+          until nc -z postgres-service 5432; do
+            echo "Esperando PostgreSQL..."
+            sleep 2
+          done
+      containers:
+      - name: api
+        image: arielben75/backend-reservas:latest
+        ports:
+        - containerPort: 8400
+          name: http
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: DATABASE_URL
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: JWT_SECRET
+        - name: NODE_ENV
+          valueFrom:
+            configMapKeyRef:
+              name: app-config
+              key: NODE_ENV
+        - name: ENV_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: app-config
+              key: ENV_PORT
+        - name: ENV_CORS
+          valueFrom:
+            configMapKeyRef:
+              name: app-config
+              key: ENV_CORS
+        - name: ENV_FILE_MAX_SIZE
+          valueFrom:
+            configMapKeyRef:
+              name: app-config
+              key: ENV_FILE_MAX_SIZE
+        - name: DEBUG_SERVER
+          valueFrom:
+            configMapKeyRef:
+              name: app-config
+              key: DEBUG_SERVER
+        - name: ENV_SWAGGER_SHOW
+          valueFrom:
+            configMapKeyRef:
+              name: app-config
+              key: ENV_SWAGGER_SHOW
+        - name: ENV_APP_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: app-config
+              key: ENV_APP_NAME
+        # CAMBIO IMPORTANTE: Solo iniciar la app, sin migrations
+        command:
+        - sh
+        - -c
+        - "npx prisma migrate deploy && npm run start:prod"
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8400
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8400
+          initialDelaySeconds: 40
+          periodSeconds: 10
+          timeoutSeconds: 10
+          failureThreshold: 3
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
